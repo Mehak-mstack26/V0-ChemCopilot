@@ -1,0 +1,19 @@
+.env 
+# Ignore Python-related files (compiled bytecode and cache)
+__pycache__/
+
+# Ignore directories containing model or data-related files that should not be tracked
+RetroSynthesisAgent/pdf_pi/
+RetroSynthesisAgent/res_pi/
+RetroSynthesisAgent/tree_pi/
+
+# Ignore specific JSON files that contain generated or large data (possibly not needed in the repo)
+naming_alg_llm_res.json
+no_download_link_titles.json
+smiles_cache.json
+substance_query_result.json
+synonym_hashmap_1.json
+synonym_hashmap_2.json
+
+# Ignore directories containing additional untracked data or files
+pdf_add/
