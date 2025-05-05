@@ -47,14 +47,14 @@ class ReactionClassifier:
             if self.dataset_path1 and os.path.exists(self.dataset_path1):
                 self.dataset1 = pd.read_parquet(self.dataset_path1)
                 print(f"Successfully loaded dataset 1: {self.dataset_path1}")
-                print(f"Dataset 1 shape: {self.dataset1.shape}")
-                print(f"Dataset 1 columns: {self.dataset1.columns.tolist()}")
+                # print(f"Dataset 1 shape: {self.dataset1.shape}")
+                # print(f"Dataset 1 columns: {self.dataset1.columns.tolist()}")
             
             if self.dataset_path2 and os.path.exists(self.dataset_path2):
                 self.dataset2 = pd.read_parquet(self.dataset_path2)
                 print(f"Successfully loaded dataset 2: {self.dataset_path2}")
-                print(f"Dataset 2 shape: {self.dataset2.shape}")
-                print(f"Dataset 2 columns: {self.dataset2.columns.tolist()}")
+                # print(f"Dataset 2 shape: {self.dataset2.shape}")
+                # print(f"Dataset 2 columns: {self.dataset2.columns.tolist()}")
                 
         except Exception as e:
             print(f"Error loading datasets: {str(e)}")

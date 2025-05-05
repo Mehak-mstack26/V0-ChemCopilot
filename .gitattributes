@@ -1,3 +1,2 @@
 *.parquet filter=lfs diff=lfs merge=lfs -text
 RetroSynthesisAgent/version.smi.gz filter=lfs diff=lfs merge=lfs -text
-RetroSynthesisAgent/RetroSynAgent/emol.json filter=lfs diff=lfs merge=lfs -text

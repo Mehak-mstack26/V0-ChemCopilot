@@ -471,7 +471,7 @@ Reasons:
 Explain the rationale for selecting this pathway over other alternatives.
 """
 
-recommend_prompt_commercial = """
+recommend_prompt_flubendiamide_example = """
 Reaction Pathways:
 {all_pathways}
 
@@ -496,8 +496,5 @@ Repeat for each step in the chosen pathway.
 Reasons:
 Explain the rationale for selecting this pathway over other alternatives.
 """
-
-
-
 
 

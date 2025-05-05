@@ -266,17 +266,53 @@ def main(material=None, num_results=10, alignment=True, expansion=True, filtrati
     ### Recommendation
     # recommend based on specific criterion
 
+    if not all_pathways_w_reactions.strip(): # Check if the string is empty or just whitespace
+        print(f"\n============================================================")
+        print(f"No valid reaction pathways found or remaining for {material} to recommend.")
+        print(f"============================================================")
+        recommend_reactions_txt = f"No valid reaction pathways found for {material}."
+
+    else:
+        # Use a general prompt that accepts the material name
+        print(f"Requesting recommendation for {material} based on found pathways...") # Added print
+        prompt_recommend_general = prompts.recommend_prompt_template_general.format(
+            substance=material,  # Pass the actual material name
+            all_pathways=all_pathways_w_reactions
+        )
+        # Give the output file a more general name if needed
+        recommend_reactions_txt = recommendReactions(
+            prompt_recommend_general,
+            result_folder_name,
+            response_name='recommend_pathway_general' # Changed filename
+        )
+
+    # Optional: Parse the final recommendation text if needed downstream
+    # parsed_data = parse_reaction_data(recommend_reactions_txt)
+    # print(parsed_data)
+
+    return recommend_reactions_txt
+
+
     # [1]
-    prompt_recommend1 = prompts.recommend_prompt_commercial.format(all_pathways = all_pathways_w_reactions)
-    recommend1_reactions_txt = recommendReactions(prompt_recommend1, result_folder_name, response_name='recommend_pathway1')
-    # parsed_data = parse_reaction_data(recommend1_reactions_txt)
-    # tree_pathway1 = Tree(material.lower(), reactions_txt=recommend1_reactions_txt)
-    # print('Starting to construct recommended pathway 1 ...')
-    # tree_pathway1.construct_tree()
-    # tree_name_pathway1 = tree_folder_name + '/' + material + '_pathway1' + '.pkl'
-    # treeloader.save_tree(tree_pathway1, tree_name_pathway1)
-    # print(parsed_data) 
-    return recommend1_reactions_txt 
+    # prompt_recommend1 = prompts.recommend_prompt_commercial.format(all_pathways = all_pathways_w_reactions)
+    # recommend1_reactions_txt = recommendReactions(prompt_recommend1, result_folder_name, response_name='recommend_pathway1')
+    # # parsed_data = parse_reaction_data(recommend1_reactions_txt)
+    # # tree_pathway1 = Tree(material.lower(), reactions_txt=recommend1_reactions_txt)
+    # # print('Starting to construct recommended pathway 1 ...')
+    # # tree_pathway1.construct_tree()
+    # # tree_name_pathway1 = tree_folder_name + '/' + material + '_pathway1' + '.pkl'
+    # # treeloader.save_tree(tree_pathway1, tree_name_pathway1)
+    # # print(parsed_data) 
+    # return recommend1_reactions_txt 
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
+
+
+
+
