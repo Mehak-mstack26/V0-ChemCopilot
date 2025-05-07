@@ -1,10 +1,13 @@
 .env 
+.DS_Store
 # Ignore Python-related files (compiled bytecode and cache)
 __pycache__/
 
 
 RetroSynthesisAgent/RetroSynAgent/emol.json 
+RetroSynthesisAgent/.DS_Store
 # Ignore directories containing model or data-related files that should not be tracked
+RetroSynthesisAgent/results_*/
 RetroSynthesisAgent/pdf_pi/
 RetroSynthesisAgent/res_pi/
 RetroSynthesisAgent/tree_pi/

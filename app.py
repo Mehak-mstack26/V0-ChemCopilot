@@ -20,8 +20,8 @@ from tools.retrosynthesis import run_retrosynthesis
 # Import NameToSMILES tool
 from tools.name2smiles import NameToSMILES  # Update this with the correct import path
 
-# Initialize LLM for name to SMILES conversion
-llm = ChatOpenAI(model="gpt-4o", temperature=0)
+# Initialize LLM for name to SMILES conversion and analysis
+llm = ChatOpenAI(model="gpt-4o", temperature=0, streaming=True) # Added streaming=True
 # Initialize NameToSMILES tool
 name_to_smiles_tool = NameToSMILES()
 
@@ -89,6 +89,13 @@ st.markdown("""
         margin-top: 20px;
         border-left: 4px solid #3f51b5;
     }
+    .pathway-card {
+        background-color: #e8f5e9;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        border-left: 4px solid #1b5e20;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -96,11 +103,15 @@ st.markdown("""
 if 'query' not in st.session_state:
     st.session_state.query = ""
 if 'retro_results' not in st.session_state:
-    st.session_state.retro_results = None
+    st.session_state.retro_results = None # Will store the 'data' part of successful retro_result
+if 'all_parsed_reactions_by_idx' not in st.session_state:
+    st.session_state.all_parsed_reactions_by_idx = {}
+if 'ranked_pathways' not in st.session_state:
+    st.session_state.ranked_pathways = []
 if 'selected_rxn_smiles' not in st.session_state:
     st.session_state.selected_rxn_smiles = None
-if 'analysis_result' not in st.session_state:
-    st.session_state.analysis_result = None
+if 'analysis_result_text' not in st.session_state: # For storing text from LLM
+    st.session_state.analysis_result_text = ""
 if 'rxn_query' not in st.session_state:
     st.session_state.rxn_query = ""
 if 'show_analyze_section' not in st.session_state:
@@ -111,351 +122,279 @@ def get_smiles_from_name(name):
     """Get SMILES notation for a chemical name using the NameToSMILES tool"""
     try:
         result = name_to_smiles_tool._run(name)
-        if "SMILES:" in result:
-            # Extract SMILES from the result
+        if result and "SMILES:" in result: # Added check for result not being None
             smiles = result.split("SMILES:")[1].split("\n")[0].strip()
             return smiles
+        st.warning(f"Could not convert '{name}' to SMILES using NameToSMILES tool. Result: {result}")
         return None
     except Exception as e:
         st.error(f"Error converting {name} to SMILES: {str(e)}")
         return None
 
-# Function to convert reactant and product names to SMILES
-def convert_to_reaction_smiles(reactants, products):
-    """Convert reactant and product names to reaction SMILES format using LLM and NameToSMILES tool"""
-    reactant_smiles = []
-    product_smiles = []
-    
-    # First try to convert each reactant and product using NameToSMILES tool
-    for reactant in reactants:
-        smiles = get_smiles_from_name(reactant)
-        if smiles:
-            reactant_smiles.append(smiles)
-        else:
-            reactant_smiles.append(reactant)  # Keep original name if conversion fails
-    
-    for product in products:
-        smiles = get_smiles_from_name(product)
-        if smiles:
-            product_smiles.append(smiles)
-        else:
-            product_smiles.append(product)  # Keep original name if conversion fails
-    
-    # If NameToSMILES failed for some compounds, use LLM as backup
-    if any(not re.match(r'^[A-Za-z0-9@\[\]\.\+\-\=\#\:\(\)\\\/;\$\%\|\{\}]+$', r) for r in reactant_smiles) or \
-       any(not re.match(r'^[A-Za-z0-9@\[\]\.\+\-\=\#\:\(\)\\\/;\$\%\|\{\}]+$', p) for p in product_smiles):
-        
-        prompt = f"""Convert these chemical names to a reaction SMILES format.
+# Function to convert reactant and product names to SMILES for a reaction
+def convert_names_to_reaction_smiles(reactants_names, products_names):
+    """Convert lists of reactant and product names to a reaction SMILES string."""
+    reactant_smiles_list = [get_smiles_from_name(name) or name for name in reactants_names]
+    product_smiles_list = [get_smiles_from_name(name) or name for name in products_names]
 
-Reactants: {', '.join(reactants)}
-Products: {', '.join(products)}
+    # Check if all components were successfully converted to actual SMILES (heuristic: no spaces)
+    all_react_valid_smi = all(smi and not ' ' in smi for smi in reactant_smiles_list)
+    all_prod_valid_smi = all(smi and not ' ' in smi for smi in product_smiles_list)
 
-Format the output as reaction SMILES using the format: reactant1.reactant2>>product1.product2
-Only output the SMILES, no explanations.
-"""
-        
-        try:
-            response = llm.invoke(prompt)
-            reaction_smiles = response.content.strip()
-            
-            # Verify that the output looks like a reaction SMILES
-            if ">>" in reaction_smiles:
-                return reaction_smiles
-        except Exception as e:
-            st.error(f"Error converting to reaction SMILES with LLM: {str(e)}")
-    
-    # Join SMILES directly if all conversions were successful
-    reactants_str = '.'.join(reactant_smiles)
-    products_str = '.'.join(product_smiles)
-    return f"{reactants_str}>>{products_str}"
-
-# Function to extract clean SMILES from reaction data
-def extract_reaction_smiles(reaction):
-    """Extract or generate clean reaction SMILES from reaction data"""
-    # First check if there's a valid reaction_smiles that doesn't have placeholders
-    if "reaction_smiles" in reaction and reaction["reaction_smiles"]:
-        smiles = reaction["reaction_smiles"]
-        # Check if it contains placeholders
-        if not re.search(r'\[.*?_SMILES\]|\[.*?\]', smiles) and ">>" in smiles:
-            return smiles
-    
-    # If reaction_smiles is not usable, create from reactants and products
-    return convert_to_reaction_smiles(reaction["reactants"], reaction["products"])
-
-# Function to create reaction SMILES from reactants and products
-def create_reaction_smiles(reactants, products):
-    """Create reaction SMILES from reactants and products, handling both SMILES and name inputs"""
-    # Check if inputs are likely SMILES or names
-    smiles_pattern = r'^[A-Za-z0-9@\[\]\.\+\-\=\#\:\(\)\\\/;\$\%\|\{\}]+$'
-    
-    # Check if all reactants and products are SMILES
-    all_smiles = all(re.match(smiles_pattern, r) for r in reactants) and all(re.match(smiles_pattern, p) for p in products)
-    
-    if all_smiles:
-        # Join SMILES directly
-        reactants_str = '.'.join(reactants)
-        products_str = '.'.join(products)
-        return f"{reactants_str}>>{products_str}"
+    if reactant_smiles_list and product_smiles_list and all_react_valid_smi and all_prod_valid_smi:
+        return f"{'.'.join(reactant_smiles_list)}>>{'.'.join(product_smiles_list)}"
     else:
-        # Use conversion function
-        return convert_to_reaction_smiles(reactants, products)
+        st.warning(f"Failed to convert all names to SMILES for reaction. R: {reactant_smiles_list}, P: {product_smiles_list}")
+        # Fallback to name-based representation if conversion fails for some
+        return f"{'.'.join(reactants_names)}>>{'.'.join(products_names)}"
 
-# Function to handle reaction analysis
-def analyze_reaction(reactants, products):
-    """Analyze reaction by converting names to SMILES if necessary"""
-    reaction_smiles = create_reaction_smiles(reactants, products)
+
+# Function to extract or generate clean reaction SMILES for analysis
+def get_reaction_smiles_for_analysis(reaction_obj):
+    """
+    Prioritizes cleaned_reaction_smiles from backend. 
+    If not available or invalid, generates from reactants/products names.
+    """
+    if reaction_obj.get("cleaned_reaction_smiles"):
+        # Basic validation for ">>"
+        if ">>" in reaction_obj["cleaned_reaction_smiles"]:
+            return reaction_obj["cleaned_reaction_smiles"]
+        else:
+            st.warning(f"Backend 'cleaned_reaction_smiles' for idx {reaction_obj.get('idx')} ('{reaction_obj.get('cleaned_reaction_smiles')}') seems invalid. Attempting regeneration.")
     
-    if reaction_smiles:
-        st.session_state.selected_rxn_smiles = reaction_smiles
-        st.session_state.query = f"Give full information about this rxn {reaction_smiles}"
-        st.session_state.show_analyze_section = True
-        return True
-    else:
-        st.error("Could not create reaction SMILES. Please check the reactants and products.")
-        return False
+    # Fallback to generating from names if cleaned_reaction_smiles is missing, None, or invalid
+    st.info(f"Generating SMILES for reaction idx {reaction_obj.get('idx')} from reactant/product names as 'cleaned_reaction_smiles' was not suitable.")
+    return convert_names_to_reaction_smiles(reaction_obj.get("reactants", []), reaction_obj.get("products", []))
+
 
 # App Header
 st.markdown('<p class="main-header">ChemCopilot</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Your Expert Chemistry Assistant</p>', unsafe_allow_html=True)
 
-# Sidebar with tools info and examples
+# Sidebar
 with st.sidebar:
     st.markdown("## Tools Available")
-    
-    with st.expander("🔍 SMILES2Name"):
-        st.markdown("Converts SMILES notation to chemical names.")
-        st.markdown("*Example:* `C1=CC=CC=C1` → `Benzene`")
-    
-    with st.expander("📝 Name2SMILES"):
-        st.markdown("Converts chemical names to SMILES notation.")
-        st.markdown("*Example:* `Ethanol` → `CCO`")
-    
-    with st.expander("🧪 FuncGroups"):
-        st.markdown("Analyzes functional groups in molecules.")
-        st.markdown("*Example:* `C(O)(=O)C1=CC=CC=C1` → `Carboxylic acid, Aromatic ring`")
-    
-    with st.expander("⚛️ BondChangeAnalyzer"):
-        st.markdown("Analyzes bond changes in chemical reactions.")
-        st.markdown("*Example:* `CCCl.CC[O-].[Na+]>>CCOCC.[Na+].[Cl-]` → `C-Cl bond broken, C-O bond formed`")
-    
+    with st.expander("🔍 SMILES2Name"): st.markdown("Converts SMILES notation to chemical names.\n*Example:* C1=CC=CC=C1 → Benzene")
+    with st.expander("📝 Name2SMILES"): st.markdown("Converts chemical names to SMILES notation.\n*Example:* Ethanol → CCO")
+    with st.expander("🧪 FuncGroups"): st.markdown("Analyzes functional groups in molecules.\n*Example:* C(O)(=O)C1=CC=CC=C1 → Carboxylic acid, Aromatic ring")
+    with st.expander("⚛️ BondChangeAnalyzer"): st.markdown("Analyzes bond changes in chemical reactions.\n*Example:* CCCl.CC[O-].[Na+]>>CCOCC.[Na+].[Cl-] → C-Cl bond broken, C-O bond formed")
     st.markdown("## Example Queries")
-    
     if st.button("Search for Flubendiamide"):
         st.session_state.query = "flubendiamide"
         st.session_state.show_analyze_section = False
+        st.session_state.retro_results = None
+        st.session_state.all_parsed_reactions_by_idx = {}
+        st.session_state.ranked_pathways = []
         st.rerun()
-        
     if st.button("Search for 2-amino-5-chloro-3-methyl benzoic acid"):
         st.session_state.query = "2-amino-5-chloro-3-methyl benzoic acid"
         st.session_state.show_analyze_section = False
+        st.session_state.retro_results = None
+        st.session_state.all_parsed_reactions_by_idx = {}
+        st.session_state.ranked_pathways = []
         st.rerun()
-        
     if st.button("Reaction Analysis Example"):
-        st.session_state.query = "Give full information about this rxn CCCl.CC[O-].[Na+]>>CCOCC.[Na+].[Cl-]"
+        st.session_state.query = "" # Clear compound search
         st.session_state.selected_rxn_smiles = "CCCl.CC[O-].[Na+]>>CCOCC.[Na+].[Cl-]"
         st.session_state.show_analyze_section = True
+        st.session_state.retro_results = None
+        st.session_state.all_parsed_reactions_by_idx = {}
+        st.session_state.ranked_pathways = []
         st.rerun()
 
-# Main content area - integrated into a single page
+# Main content area
 st.markdown("## Retrosynthesis & Reaction Analysis")
 
-# Search Input Section
-compound_name = st.text_input(
+compound_name_input = st.text_input(
     "Enter compound name (IUPAC or common name):",
     value=st.session_state.query if not st.session_state.show_analyze_section else "",
-    placeholder="Example: flubendiamide, 2-amino-5-chloro-3-methyl benzoic acid",
-    key="search_compound_name"
+    placeholder="Example: flubendiamide",
+    key="search_compound_name_input"
 )
 
 search_button = st.button("Search Retrosynthesis", key="search_retro_button")
 
-# Process Search
-if search_button and compound_name:
-    st.session_state.query = compound_name
-    st.session_state.show_analyze_section = False  # Reset analysis section
-    
-    with st.spinner("Searching for retrosynthesis pathways..."):
+if search_button and compound_name_input:
+    st.session_state.query = compound_name_input
+    st.session_state.show_analyze_section = False 
+    st.session_state.retro_results = None # Clear previous results
+    st.session_state.all_parsed_reactions_by_idx = {}
+    st.session_state.ranked_pathways = []
+
+    with st.spinner(f"Searching for retrosynthesis pathways for '{compound_name_input}'... This may take a few minutes."):
         try:
-            # Call your retrosynthesis function
-            retro_result = run_retrosynthesis(compound_name)
+            retro_result_full = run_retrosynthesis(compound_name_input) # Call backend
             
-            if retro_result.get("status") == "success":
-                # Process the reactions to ensure we have usable SMILES
-                for reaction in retro_result["data"]["reactions"]:
-                    # Extract or create valid reaction SMILES
-                    reaction["cleaned_reaction_smiles"] = extract_reaction_smiles(reaction)
+            if retro_result_full and retro_result_full.get("status") == "success":
+                st.session_state.retro_results = retro_result_full.get("data")
+                st.session_state.all_parsed_reactions_by_idx = st.session_state.retro_results.get("all_parsed_reactions_by_idx", {})
+                st.session_state.ranked_pathways = st.session_state.retro_results.get("ranked_pathways", [])
                 
-                st.session_state.retro_results = retro_result["data"]
-                st.success(f"Found {len(retro_result['data']['reactions'])} reactions for {compound_name}")
-            else:
-                error_message = retro_result.get('message', 'Unknown error')
-                # Check for the specific "lack of pathways" error
-                if "Recommendation could not be generated" in error_message and "lack of pathways" in error_message:
-                    st.warning(f"Warning: No synthesis pathways found for '{compound_name}' in the searched literature or internal databases. Retrosynthesis analysis could not be completed.")
-                    st.info("Consider refining the search or checking alternative sources for synthesis information.")
+                # Check if any reactions were returned for the recommended pathway
+                if st.session_state.retro_results and st.session_state.retro_results.get("reactions"):
+                    st.success(f"Found {len(st.session_state.retro_results.get('reactions',[]))} reaction steps in the primary recommended pathway for {compound_name_input}.")
                 else:
-                    # Display other errors as before
-                    st.error(f"Error: {error_message}")
-
-                # Always show traceback if available, regardless of error type
-                if retro_result.get('traceback'):
+                    st.warning(f"Retrosynthesis search completed, but no specific recommended reaction steps were found for {compound_name_input}. The reasoning might provide general guidance.")
+                    if not st.session_state.retro_results.get("reasoning"): # If no reasoning either
+                         st.warning(f"No synthesis pathways or reasoning found for '{compound_name_input}' in the searched literature or databases.")
+            else: # Error or no success
+                error_message = retro_result_full.get('message', 'Unknown error during retrosynthesis.')
+                st.error(f"Error: {error_message}")
+                if retro_result_full and retro_result_full.get('traceback'):
                     with st.expander("See error details"):
-                        st.code(retro_result.get('traceback'))
-
+                        st.code(retro_result_full.get('traceback'))
         except Exception as e:
             st.error(f"Failed to fetch retrosynthesis data: {str(e)}")
             import traceback
             with st.expander("See error details"):
                 st.code(traceback.format_exc())
+    st.rerun() # Rerun to display results
 
-# Display retrosynthesis results if available
+# Display retrosynthesis results
 if st.session_state.retro_results and not st.session_state.show_analyze_section:
     st.markdown("## Retrosynthesis Pathway")
     
-    # Display recommended pathway
-    st.markdown("### Recommended Synthesis Route")
-    st.markdown(st.session_state.retro_results["reasoning"])
+    # Display ranked pathways first
+    # The key from backend is now 'ranked_pathways' which contains a list of dicts
+    # Each dict has 'rank', 'pathway_indices_str', 'details_text', 'reasons'
+    if st.session_state.ranked_pathways: # This now refers to st.session_state.retro_results.get("ranked_pathways", [])
+        st.markdown("### Ranked Synthesis Routes")
+        
+        for pathway_info in st.session_state.ranked_pathways: # Iterate through the list of pathway dicts
+            # Use 'pathway_indices_str' for the expander title
+            expander_title = f"Rank {pathway_info.get('rank')}: Pathway {pathway_info.get('pathway_indices_str', 'N/A')}"
+            with st.expander(expander_title):
+                st.markdown("#### Details")
+                # Use 'details_text' for the details content
+                st.markdown(pathway_info.get('details_text', 'No details provided')) 
+                
+                if pathway_info.get('reasons'):
+                    st.markdown("#### Reasoning")
+                    st.markdown(pathway_info.get('reasons'))
     
-    # Display reactions
-    st.markdown("### Reactions")
+    # Display reasoning for the recommended pathway (overall reasoning)
+    if st.session_state.retro_results.get("reasoning"):
+        st.markdown("### Recommendation Reasoning (Overall)") # Clarified this is overall
+        st.markdown(st.session_state.retro_results.get("reasoning"))
     
-    for i, reaction in enumerate(st.session_state.retro_results["reactions"]):
-        with st.container():
-            st.markdown(f'<div class="reaction-card">', unsafe_allow_html=True)
-            
-            # Highlight if this is a recommended step
-            if reaction["idx"] in st.session_state.retro_results["recommended_indices"]:
-                st.markdown(f"**Step {i+1} (Recommended)**: {reaction['idx']}")
-            else:
-                st.markdown(f"**Step {i+1}**: {reaction['idx']}")
-            
-            # Reactants and products
-            reactants_str = " + ".join(reaction["reactants"])
-            products_str = " + ".join(reaction["products"])
-            st.markdown(f"**Reaction**: {reactants_str} → {products_str}")
-            
-            # Conditions
-            st.markdown(f"**Conditions**: {reaction['conditions']}")
-            
-            # Source
-            st.markdown(f"**Source**: {reaction['source']}")
-            
-            # Show the cleaned reaction SMILES for debugging (can be removed in production)
-            with st.expander("Reaction SMILES"):
-                st.code(reaction.get("cleaned_reaction_smiles", "No valid SMILES available"))
-            
-            # Create a button that will trigger the analysis
-            if st.button(f"Analyze Reaction {i+1}", key=f"analyze_btn_{i}"):
-                # Use the cleaned SMILES if available, otherwise generate from reactants and products
-                if "cleaned_reaction_smiles" in reaction and reaction["cleaned_reaction_smiles"]:
-                    st.session_state.selected_rxn_smiles = reaction["cleaned_reaction_smiles"]
-                    st.session_state.query = f"Give full information about this rxn {reaction['cleaned_reaction_smiles']}"
-                    st.session_state.show_analyze_section = True
-                    st.rerun()
-                else:
-                    if analyze_reaction(reaction["reactants"], reaction["products"]):
+    # Display reactions of the primary recommended pathway (reactions for Rank 1)
+    recommended_reactions_list = st.session_state.retro_results.get("reactions", []) # This list is for Rank 1
+    if recommended_reactions_list:
+        st.markdown("### Recommended Synthesis Route Steps (Rank 1 Pathway)") # Clarified this is for Rank 1
+        for i, reaction_obj in enumerate(recommended_reactions_list):
+            # ... (the rest of the reaction display loop remains the same) ...
+            with st.container():
+                st.markdown(f'<div class="reaction-card">', unsafe_allow_html=True)
+                st.markdown(f"*Step {i+1}* (Reaction ID: {reaction_obj.get('idx', 'N/A')})")
+                
+                reactants_str = " + ".join(reaction_obj.get("reactants", ["N/A"]))
+                products_str = " + ".join(reaction_obj.get("products", ["N/A"]))
+                st.markdown(f"*Reaction*: {reactants_str} → {products_str}")
+                
+                conditions_dict = reaction_obj.get("conditions", {})
+                conditions_str_list = [f"{k.capitalize()}: {v}" for k, v in conditions_dict.items()] if conditions_dict else ["Not specified"]
+                st.markdown(f"*Conditions*: {', '.join(conditions_str_list)}")
+                
+                st.markdown(f"*Source*: {reaction_obj.get('source', 'N/A')}")
+                
+                with st.expander("View SMILES and Processing Info"):
+                    st.write(f"Original LLM SMILES: {reaction_obj.get('reaction_smiles', 'N/A')}")
+                    st.write(f"Processed SMILES for Analysis: {reaction_obj.get('cleaned_reaction_smiles', 'N/A')}")
+                    st.write(f"SMILES Generation Attempted by Backend: {reaction_obj.get('smiles_generation_attempted', False)}")
+                
+                # Key for the button should be unique for each step of the Rank 1 pathway
+                analyze_button_key = f"analyze_btn_rank1_step_{i}_{reaction_obj.get('idx', 'no_idx_at_step_'+str(i))}"
+                
+                if st.button(f"Analyze Reaction Step {i+1}", key=analyze_button_key):
+                    reaction_smiles_for_analysis = get_reaction_smiles_for_analysis(reaction_obj)
+                    if reaction_smiles_for_analysis and ">>" in reaction_smiles_for_analysis:
+                        st.session_state.selected_rxn_smiles = reaction_smiles_for_analysis
+                        st.session_state.show_analyze_section = True
+                        st.session_state.analysis_result_text = "" 
                         st.rerun()
-            
-            st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.error(f"Could not obtain or generate a valid reaction SMILES for analysis. Attempted: '{reaction_smiles_for_analysis}'")
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+    elif not st.session_state.retro_results.get("reasoning") and not st.session_state.ranked_pathways:
+        st.info(f"No specific retrosynthesis pathway details or reasoning were found for '{st.session_state.query}'.")
 
-# Analysis Section - shows either when a reaction is selected for analysis or when directly analyzing
+
+# Analysis Section
 if st.session_state.show_analyze_section:
+    # Analysis section code remains the same
     st.markdown('<div class="analysis-section">', unsafe_allow_html=True)
     st.markdown("## Reaction Analysis")
     
-    # Show selected reaction SMILES
     if st.session_state.selected_rxn_smiles:
-        st.markdown("### Selected Reaction")
+        st.markdown("### Analyzing Reaction:")
         st.code(st.session_state.selected_rxn_smiles)
-    
-    # Process the selected reaction for analysis
-    if st.session_state.selected_rxn_smiles and not st.session_state.analysis_result:
-        with st.spinner("Analyzing reaction..."):
-            # Create the full analysis query
-            analysis_query = f"Give full information about this rxn {st.session_state.selected_rxn_smiles}"
-            
-            # Use the callback handler for streaming updates
-            callback_container = st.container()
-            st_callback = StreamlitCallbackHandler(callback_container)
-            
-            try:
-                # Pass the callback to your backend function
-                result = enhanced_query(analysis_query, callbacks=[st_callback])
-                st.session_state.analysis_result = result
-            except Exception as e:
-                st.error(f"An error occurred during analysis: {str(e)}")
-                import traceback
-                with st.expander("See error details"):
-                    st.code(traceback.format_exc())
-    
-    # Display analysis results
-    if st.session_state.analysis_result:
-        # Display visualization if available
-        if st.session_state.analysis_result.get('visualization_path') and os.path.exists(st.session_state.analysis_result.get('visualization_path')):
-            st.markdown("### Reaction Visualization")
-            st.image(st.session_state.analysis_result.get('visualization_path'), caption="Chemical Reaction Visualization")
-            
-            # Add this line to make file path less prominent but still available
-            with st.expander("Image file details"):
-                st.code(st.session_state.analysis_result.get('visualization_path'))
         
-        # Display the analysis text
-        st.markdown("### Analysis Results")
-        st.markdown('<div class="result-area">', unsafe_allow_html=True)
-        st.markdown(st.session_state.analysis_result.get('analysis', 'No analysis available'))
-        st.markdown('</div>', unsafe_allow_html=True)
+        # Rest of the analysis section code...
+        if not st.session_state.analysis_result_text:
+            with st.spinner("Analyzing reaction with LLM..."):
+                analysis_query_for_llm = f"Give full information about this rxn {st.session_state.selected_rxn_smiles}"
+                
+                analysis_display_area = st.empty()
+                st_callback_analysis = StreamlitCallbackHandler(analysis_display_area)
+                
+                try:
+                    llm_response_data = enhanced_query(analysis_query_for_llm, callbacks=[st_callback_analysis])
+                    if llm_response_data and llm_response_data.get('analysis') and not analysis_display_area.empty:
+                        analysis_display_area.markdown(llm_response_data.get('analysis'))
+                    
+                    st.session_state.analysis_result_text = llm_response_data.get('analysis', "No analysis text returned.")
+
+                except Exception as e_analysis:
+                    st.error(f"An error occurred during LLM analysis: {str(e_analysis)}")
+                    st.session_state.analysis_result_text = "Error during analysis."
         
-        # Add a query box for follow-up questions about the reaction
+        if st.session_state.analysis_result_text:
+            st.markdown('<div class="result-area">', unsafe_allow_html=True)
+            st.markdown(st.session_state.analysis_result_text)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Follow-up question box
         st.markdown('<div class="query-box">', unsafe_allow_html=True)
         st.markdown("### Ask About This Reaction")
         
-        rxn_query = st.text_area(
+        current_rxn_query = st.text_area(
             "Enter your question about this reaction:",
             value=st.session_state.rxn_query,
             height=80,
-            placeholder="Example: What is the mechanism of this reaction? How does this reaction relate to industrial processes?",
-            key="rxn_query_input"
+            key="rxn_query_input_follow_up"
         )
         
-        if st.button("Ask Question", key="ask_rxn_btn") and rxn_query:
-            st.session_state.rxn_query = rxn_query
-            
-            with st.spinner("Processing your question..."):
-                try:
-                    # Create a query that includes both the reaction SMILES and the user's question
-                    combined_query = f"For the reaction {st.session_state.selected_rxn_smiles}, answer this question: {rxn_query}"
+        if st.button("Ask Question", key="ask_rxn_btn_follow_up"):
+            if current_rxn_query:
+                st.session_state.rxn_query = current_rxn_query
+                with st.spinner("Processing your question..."):
+                    combined_query_for_llm = f"Regarding the reaction {st.session_state.selected_rxn_smiles}, please answer: {st.session_state.rxn_query}"
                     
-                    # Use the callback handler for streaming updates
-                    query_response_container = st.container()
-                    query_st_callback = StreamlitCallbackHandler(query_response_container)
-                    
-                    # Get the response
-                    query_result = enhanced_query(combined_query, callbacks=[query_st_callback])
-                    
-                    # Display the answer
-                    st.markdown("### Answer")
-                    st.markdown('<div class="result-area">', unsafe_allow_html=True)
-                    st.markdown(query_result.get('analysis', 'No answer available'))
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
-                    st.markdown("Please check your question format and try again.")
-        
+                    follow_up_display_area = st.container()
+                    st_callback_follow_up = StreamlitCallbackHandler(follow_up_display_area)
+                    try:
+                        follow_up_response_data = enhanced_query(combined_query_for_llm, callbacks=[st_callback_follow_up])
+                        if follow_up_response_data and follow_up_response_data.get('analysis'):
+                             follow_up_display_area.markdown("### Answer")
+                             follow_up_display_area.markdown('<div class="result-area">', unsafe_allow_html=True)
+                             follow_up_display_area.markdown(follow_up_response_data.get('analysis'))
+                             follow_up_display_area.markdown('</div>', unsafe_allow_html=True)
+                    except Exception as e_follow_up:
+                        follow_up_display_area.error(f"An error occurred: {str(e_follow_up)}")
+            else:
+                st.warning("Please enter a question.")
         st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Add a button to clear analysis and return to retrosynthesis results
-        if st.button("← Back to Retrosynthesis Results", key="back_btn"):
-            st.session_state.show_analyze_section = False
-            st.session_state.selected_rxn_smiles = None
-            st.session_state.analysis_result = None
-            st.session_state.rxn_query = ""
-            st.rerun()
+            
+    if st.button("← Back to Retrosynthesis Results", key="back_btn"):
+        st.session_state.show_analyze_section = False
+        st.session_state.selected_rxn_smiles = None
+        st.session_state.analysis_result_text = ""
+        st.session_state.rxn_query = ""
+        st.rerun()
             
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Footer
 st.markdown("---")
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    st.caption("ChemCopilot - Your Expert Chemistry Assistant")
+st.caption("ChemCopilot - Your Expert Chemistry Assistant", unsafe_allow_html=True)
